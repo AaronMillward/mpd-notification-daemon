@@ -1,12 +1,12 @@
 use mpd::Idle;
 
+const SHOW_OPTIONS_NOTIFICATIONS: bool = true;
+
 fn main() {
 	let mut client = mpd::Client::connect("127.0.0.1:6600").unwrap();
 
 	let mut previous_notification_id = None;
 	let mut previous_song_id = None;
-
-	const SHOW_OPTIONS_NOTIFICATIONS: bool = true;
 
 	loop {
 		let updates = client.wait(&[
@@ -36,15 +36,17 @@ fn main() {
 }
 
 fn player_updated(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, notification: &mut notify_rust::Notification, previous_notification_id: &mut Option<u32>) {
+	/* TODO: The MPD crate doesn't have support for the "albumart" command and the `Proto` module isn't public to manually use it. */
+	
 	let status = client.status().unwrap();
 
 	match status.state {
 		mpd::State::Stop => {
 			notification
-				.summary("MPD Stopped");
+				.summary("MPD Stopped")
+				.icon("media-playback-stop");
 		},
 		mpd::State::Play => {
-			eprintln!("update.");
 			/* Determine if song was replayed or is new. */
 			{
 				let current_song_id = status.song.map(|s| s.id);
@@ -52,11 +54,11 @@ fn player_updated(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::I
 				let is_the_same_song = *previous_song_id == current_song_id;
 
 				if is_the_same_song {
-					/* XXX: Using 10 Milliseconds as I'm unsure how precise the playback time is. */
 					/* XXX: The user could also spam this by scrubbing back and forth. */
 					let has_just_started = status.elapsed.unwrap().is_zero();
 					if has_just_started {
 						notification
+							.icon("media-skip-backward")
 							.summary("Playing Again");
 					} else {
 						/* This is the resume playback case, so we don't need a notification. */
@@ -64,12 +66,12 @@ fn player_updated(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::I
 					}
 				} else {
 					notification
+						.icon("media-playback-start")
 						.summary("Now Playing");
 				}
 
 				*previous_song_id = current_song_id;
 			}
-
 			fill_notification_with_song_info(&client.currentsong().unwrap().unwrap(), notification);
 		},
 		mpd::State::Pause => return,
