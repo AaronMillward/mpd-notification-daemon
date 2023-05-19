@@ -1,16 +1,19 @@
 use mpd::Idle;
 
-const SHOW_OPTIONS_NOTIFICATIONS: bool = true;
-
 fn main() {
-	let mut client = mpd::Client::connect("127.0.0.1:6600").unwrap();
+	let mut client = {
+		/* Get MPD host from environment */ 
+		let host = std::env::var("MPD_HOST").unwrap_or("127.0.0.1".into());
+		let port = std::env::var("MPD_PORT").unwrap_or("6600".into());
+
+		mpd::Client::connect(host + ":" + &port).unwrap()
+	};
 
 	let mut previous_notification_id = None;
 	let mut previous_song_id = None;
 
 	loop {
 		let updates = client.wait(&[
-			mpd::idle::Subsystem::Options,
 			mpd::idle::Subsystem::Player,
 			]).expect("failed to return from idle.");
 
@@ -23,11 +26,6 @@ fn main() {
 			match subsystem {
 				mpd::Subsystem::Player => {
 					player_updated(&mut client, &mut previous_song_id, &mut notification, &mut previous_notification_id)
-				},
-				mpd::Subsystem::Options => {
-					if SHOW_OPTIONS_NOTIFICATIONS {
-
-					}
 				},
 				_ => unimplemented!("not listening for these subsystems.")
 			}
@@ -104,6 +102,8 @@ fn fill_notification_with_song_info(song: &mpd::Song, notification: &mut notify_
 }
 
 fn show_notification(notification: &mut notify_rust::Notification, previous_notification_id: &mut Option<u32>) {
+	/* XXX: I don't know how ids work, is it possible for them to be reused by another program? */
+
 	if let Some(id) = previous_notification_id {
 		notification.id(*id);
 	}
@@ -115,7 +115,7 @@ fn show_notification(notification: &mut notify_rust::Notification, previous_noti
 			*previous_notification_id = Some(s.id());
 		},
 		Err(e) => {
-			*previous_notification_id = None;
+			
 			eprintln!("failed to show mpd notification: {}", e);
 		},
 	}
