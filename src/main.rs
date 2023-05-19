@@ -2,11 +2,21 @@ use mpd::Idle;
 
 fn main() {
 	let mut client = {
-		/* Get MPD host from environment */ 
+		/* Get MPD host from environment */
 		let host = std::env::var("MPD_HOST").unwrap_or("127.0.0.1".into());
 		let port = std::env::var("MPD_PORT").unwrap_or("6600".into());
+		let address = host + ":" + &port;
 
-		mpd::Client::connect(host + ":" + &port).unwrap()
+		loop {
+			match mpd::Client::connect(&address) {
+				Ok(c) => break c,
+				Err(e) => {
+					eprintln!("Failed to connect to MPD on {} due to error {}, retrying", address, e);
+					std::thread::sleep(std::time::Duration::from_secs(5));
+					continue;
+				},
+			}
+		}
 	};
 
 	let mut previous_notification_id = None;
@@ -36,7 +46,7 @@ fn main() {
 fn player_updated(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, notification: &mut notify_rust::Notification, previous_notification_id: &mut Option<u32>) {
 	/* TODO: The MPD crate doesn't have support for the "albumart" command and the `Proto` module isn't public to manually use it. */
 	
-	let status = client.status().unwrap();
+	let status = client.status().expect("should be able to get status directly after waking from idle.");
 
 	match status.state {
 		mpd::State::Stop => {
@@ -70,7 +80,7 @@ fn player_updated(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::I
 
 				*previous_song_id = current_song_id;
 			}
-			fill_notification_with_song_info(&client.currentsong().unwrap().unwrap(), notification);
+			fill_notification_with_song_info(&client.currentsong().expect("should be able to get current song after wake from idle.").expect("should be Some when player is playing."), notification);
 		},
 		mpd::State::Pause => return,
 	}
@@ -95,7 +105,7 @@ fn fill_notification_with_song_info(song: &mpd::Song, notification: &mut notify_
 		},
 	};
 
-	let title = song.title.clone().unwrap();
+	let title = song.title.clone().unwrap_or("<UNKNOWN TITLE>".into());
 
 	notification
 		.body(format!("{} - {}", display_artist, &title).as_str());
@@ -115,8 +125,7 @@ fn show_notification(notification: &mut notify_rust::Notification, previous_noti
 			*previous_notification_id = Some(s.id());
 		},
 		Err(e) => {
-			
-			eprintln!("failed to show mpd notification: {}", e);
+			eprintln!("Failed to show mpd notification: {}", e);
 		},
 	}
 }
