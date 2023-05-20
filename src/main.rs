@@ -11,7 +11,9 @@ but should we use the potentially unstable git version to do this? maybe make it
 /// But is limited in that it doesn't support anything but a local basic mpd configuration,
 /// it doesn't respect mounts and the client must be on the same filesystem as the host.
 /// 
-/// To use this hack this variable should be true and set an "MPD_MUSIC_DIRECTORY" environment variable to the music directory found in ~/.config/mpd/mpd.conf
+/// To use this hack this variable should be true, you can then either...
+/// 1. Set an "MPD_MUSIC_DIRECTORY" environment variable as the music directory
+/// 1. Leave the environment variable unset and attempt to automatically read ~/.config/mpd/mpd.conf
 const USE_COVER_ART_HACK: bool = true;
 
 fn main() {
@@ -36,7 +38,29 @@ fn main() {
 	/* TODO: You can get the music_directory from the client if it is connected by local socket 
 	Although I'm unsure if we should be using listmounts but it just seems to error when used here.
 	*/
-	let music_directory = if USE_COVER_ART_HACK { std::env::var("MPD_MUSIC_DIRECTORY").ok().map(PathBuf::from) } else { None };
+	let music_directory = if USE_COVER_ART_HACK { 
+		std::env::var("MPD_MUSIC_DIRECTORY").ok().map(PathBuf::from)
+			.or_else(|| {
+				/* Auto read the mpd config for the music directory. */
+				/* XXX: Is all this too hacky? */
+				use std::io::BufRead;
+				let f = std::fs::File::open(
+					dirs::home_dir()?.join(".config/mpd/mpd.conf")
+				).ok()?;
+				let mut opt = None;
+				for line in std::io::BufReader::new(f).lines().flatten() {
+					if line.starts_with("music_directory") {
+						let mut dir = line.split_whitespace().nth(1)?.replace('"', "");
+						if dir.starts_with('~') {
+							dir = dir.replacen('~', dirs::home_dir()?.to_str()?, 1);
+						}
+						opt = Some(std::path::PathBuf::from(dir));
+						break;
+					}
+				}
+				opt
+			})
+	} else { None };
 
 	let mut previous_notification_id = None;
 	let mut previous_song_id = None;
