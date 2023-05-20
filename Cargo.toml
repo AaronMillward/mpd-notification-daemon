@@ -7,5 +7,5 @@ edition = "2021"
 
 [dependencies]
 notify-rust = "4.8.0"
-mpd = "0.0.12"
+mpd = "0.0.12" #{ git = "https://github.com/kstep/rust-mpd.git" }
 time = "*"
