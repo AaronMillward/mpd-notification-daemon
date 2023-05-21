@@ -16,7 +16,7 @@ You will likely run into problems running any uncommon MPD setups such as a remo
 
 ### General
 - Native MPD `albumart` method
-- Handle losing connection to MPD server
+- Connect/disconnect notification
 ### Customization
 - Custom song display format instead of default `Artist - Title`
 - Enable/Disable icons

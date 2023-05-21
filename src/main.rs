@@ -17,22 +17,9 @@ but should we use the potentially unstable git version to do this? maybe make it
 const USE_COVER_ART_HACK: bool = true;
 
 fn main() {
-	let mut client = {
-		/* Get MPD host from environment */
-		let host = std::env::var("MPD_HOST").unwrap_or("127.0.0.1".into());
-		let port = std::env::var("MPD_PORT").unwrap_or("6600".into());
-		let address = host + ":" + &port;
-
-		loop {
-			match mpd::Client::connect(&address) {
-				Ok(c) => break c,
-				Err(e) => {
-					eprintln!("Failed to connect to MPD on {} due to error {}, retrying", address, e);
-					std::thread::sleep(std::time::Duration::from_secs(5));
-					continue;
-				},
-			}
-		}
+	let mut client = match connect_client() {
+		Some(c) => c,
+		None => { return; },
 	};
 
 	/* TODO: You can get the music_directory from the client if it is connected by local socket 
@@ -66,55 +53,82 @@ fn main() {
 	let mut previous_song_id = None;
 
 	loop {
-		client.wait(&[mpd::idle::Subsystem::Player]).expect("failed to return from idle.");
-
-		let mut notification = notify_rust::Notification::new();
-		notification
-			.timeout(2500)
-			.hint(notify_rust::Hint::Category("MPD".into()));
-
-		let status = client.status().expect("should be able to get status directly after waking from idle.");
-		
-		match status.state {
-			mpd::State::Stop => {
-				notification
-					.summary("MPD Stopped")
-					.icon("media-playback-stop");
-			},
-			mpd::State::Play => {
-				/* Determine if song was replayed or is new. */
-				{
-					let current_song_id = status.song.map(|s| s.id);
-		
-					let is_the_same_song = previous_song_id == current_song_id;
-		
-					if is_the_same_song {
-						/* XXX: The user could also spam this by scrubbing back and forth. */
-						/* TODO: Maybe add a timeout?  */
-						let has_just_started = status.elapsed.expect("should have elapsed time when playing.").is_zero();
-						if has_just_started {
-							notification
-								.icon("media-skip-backward")
-								.summary("Playing Again");
-						} else {
-							/* This is the resume playback case, so we don't need a notification. */
-							continue;
+		match notification_loop(&mut client, &mut previous_song_id, &mut previous_notification_id, &music_directory) {
+			Ok(_) => {},
+			Err(e) => {
+				match e {
+					mpd::error::Error::Io(e) => {
+						match e.kind() {
+							/* These are the only errors I've observed coming from killing the MPD server. */
+							std::io::ErrorKind::BrokenPipe |
+							std::io::ErrorKind::ConnectionReset => {
+								client = match connect_client() {
+									Some(c) => { c },
+									None => { return; },
+								};
+							},
+							_ => panic!("unexpected IO error in main loop: {}", e),
 						}
-					} else {
-						notification
-							.icon("media-playback-start")
-							.summary("Now Playing");
-					}
-		
-					previous_song_id = current_song_id;
+					},
+					e => {
+						eprintln!("encountered error in main loop, disgarding and continuing loop: {}", e)
+					},
 				}
-				fill_notification_with_song_info(&client.currentsong().expect("should be able to get current song after wake from idle.").expect("should be Some when player is playing."), &mut notification, &music_directory);
 			},
-			mpd::State::Pause => continue,
 		}
-		
-		show_notification(&mut notification, &mut previous_notification_id)
 	}
+}
+
+fn notification_loop(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, previous_notification_id: &mut Option<u32>, music_directory: &Option<PathBuf>) -> mpd::error::Result<()> {
+	client.wait(&[mpd::idle::Subsystem::Player])?;
+
+	let mut notification = notify_rust::Notification::new();
+	notification
+		.timeout(2500)
+		.hint(notify_rust::Hint::Category("MPD".into()));
+
+	let status = client.status()?;
+	
+	match status.state {
+		mpd::State::Stop => {
+			notification
+				.summary("MPD Stopped")
+				.icon("media-playback-stop");
+		},
+		mpd::State::Play => {
+			/* Determine if song was replayed or is new. */
+			{
+				let current_song_id = status.song.map(|s| s.id);
+	
+				let is_the_same_song = *previous_song_id == current_song_id;
+	
+				if is_the_same_song {
+					/* XXX: The user could also spam this by scrubbing back and forth. */
+					/* TODO: Maybe add a timeout?  */
+					let has_just_started = status.elapsed.expect("should have elapsed time when playing.").is_zero();
+					if has_just_started {
+						notification
+							.icon("media-skip-backward")
+							.summary("Playing Again");
+					} else {
+						/* This is the resume playback case, so we don't need a notification. */
+						return Ok(());
+					}
+				} else {
+					notification
+						.icon("media-playback-start")
+						.summary("Now Playing");
+				}
+	
+				*previous_song_id = current_song_id;
+			}
+			fill_notification_with_song_info(&client.currentsong()?.expect("should have a song when player is playing."), &mut notification, music_directory);
+		},
+		mpd::State::Pause => return Ok(()),
+	}
+	
+	show_notification(&mut notification, previous_notification_id);
+	Ok(())
 }
 
 fn fill_notification_with_song_info(song: &mpd::Song, notification: &mut notify_rust::Notification, music_directory: &Option<PathBuf>) {
@@ -168,5 +182,33 @@ fn show_notification(notification: &mut notify_rust::Notification, previous_noti
 		Err(e) => {
 			eprintln!("Failed to show mpd notification: {}", e);
 		},
+	}
+}
+
+fn connect_client() -> Option<mpd::Client> {
+	/* Get MPD host from environment */
+	let host = std::env::var("MPD_HOST").unwrap_or("127.0.0.1".into());
+	let port = std::env::var("MPD_PORT").unwrap_or("6600".into());
+	let address = host + ":" + &port;
+
+	const MAX_TRIES: u8 = 5;
+	let mut tries = 0;
+	loop {
+		match mpd::Client::connect(&address) {
+			Ok(c) => {
+				eprintln!("Successfully connected client on {}", address);
+				break Some(c)
+			},
+			Err(e) => {
+				eprintln!("Failed to connect client on {} due to error {}, try ({}/{}) retrying in 5 seconds...", address, e, tries + 1, MAX_TRIES);
+				tries += 1;
+				if tries == MAX_TRIES {
+					eprintln!("Failed to connect client after {} retries", tries);
+					break None;
+				}
+				std::thread::sleep(std::time::Duration::from_secs(5));
+				continue;
+			},
+		}
 	}
 }
