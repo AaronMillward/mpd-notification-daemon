@@ -8,7 +8,7 @@ Some desktop environments (in my case awesome and hyprland) don't send notificat
 ### Album Art
 The MPD library used in this project doesn't support the `albumart` command (in its stable version we could set it as a feature flag) so a workaround is in place to handle album art icons. 
 
-The program will need to know where the music directory is, this is the directory given in `mpd.conf` it will attempt to read this automatically or it can be provided in the `MPD_MUSIC_DIRECTORY` environment variable.
+The program will need to know where the music directory is, this is the directory given in `mpd.conf` it will attempt to read this automatically or it can be provided in the config file.
 
 You will likely run into problems running any uncommon MPD setups such as a remote server or having more than a single music directory mounted in MPD.
 
@@ -20,4 +20,3 @@ You will likely run into problems running any uncommon MPD setups such as a remo
 ### Customization
 - Custom song display format instead of default `Artist - Title`
 - Enable/Disable icons
-- Configurable notification timeout

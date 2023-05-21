@@ -6,27 +6,49 @@ use mpd::Idle;
 Update: The git version of the crate does support albumart, to use it we would need to call it, save the result to a temp file, then pass that path to the notif.
 but should we use the potentially unstable git version to do this? maybe make it a feature flag?
 */
-/// The album art hack lets us display the album art without using the "albumart" command. 
-///
-/// But is limited in that it doesn't support anything but a local basic mpd configuration,
-/// it doesn't respect mounts and the client must be on the same filesystem as the host.
-/// 
-/// To use this hack this variable should be true, you can then either...
-/// 1. Set an "MPD_MUSIC_DIRECTORY" environment variable as the music directory
-/// 1. Leave the environment variable unset and attempt to automatically read ~/.config/mpd/mpd.conf
-const USE_COVER_ART_HACK: bool = true;
 
-fn main() {
-	let mut client = match connect_client() {
-		Some(c) => c,
-		None => { return; },
-	};
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Config {
+	/// The album art hack lets us display the album art without using the "albumart" command. 
+	///
+	/// But is limited in that it doesn't support anything but a local basic mpd configuration,
+	/// it doesn't respect mounts and the client must be on the same filesystem as the host.
+	/// 
+	/// To use this hack this variable should be true, you can then either...
+	/// 1. Set `music_directory` as None to try to automatically read from `~/.config/mpd/mpd.conf`
+	/// 1. Set `music_directory` with an explicit value.
+	use_cover_art_hack: bool,
+	/// Only applies when `use_cover_art_hack` is enabled.
+	/// Should match the music directory in `~/.config/mpd/mpd.conf` or leave blank to automatically
+	/// detect from `~/.config/mpd/mpd.conf`
+	music_directory: Option<String>,
+	/// Timout in milliseconds, leave empty for system default.
+	notification_timeout: Option<u32>,
+	/// Max connection retries, 0 for unlimited.
+	max_connection_retries: u32,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			use_cover_art_hack: true,
+			music_directory: None,
+			notification_timeout: None,
+			max_connection_retries: 5
+		}
+	}
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+	let config: Config = confy::load("mpdnd", None)?;
+
+	let mut client = connect_client(config.max_connection_retries)?;
 
 	/* TODO: You can get the music_directory from the client if it is connected by local socket 
 	Although I'm unsure if we should be using listmounts but it just seems to error when used here.
 	*/
-	let music_directory = if USE_COVER_ART_HACK { 
-		std::env::var("MPD_MUSIC_DIRECTORY").ok().map(PathBuf::from)
+	let music_directory = if config.use_cover_art_hack {
+		config.music_directory.clone().map(PathBuf::from)
 			.or_else(|| {
 				/* Auto read the mpd config for the music directory. */
 				/* XXX: Is all this too hacky? */
@@ -53,7 +75,7 @@ fn main() {
 	let mut previous_song_id = None;
 
 	loop {
-		match notification_loop(&mut client, &mut previous_song_id, &mut previous_notification_id, &music_directory) {
+		match notification_loop(&config, &mut client, &mut previous_song_id, &mut previous_notification_id, &music_directory) {
 			Ok(_) => {},
 			Err(e) => {
 				match e {
@@ -62,10 +84,7 @@ fn main() {
 							/* These are the only errors I've observed coming from killing the MPD server. */
 							std::io::ErrorKind::BrokenPipe |
 							std::io::ErrorKind::ConnectionReset => {
-								client = match connect_client() {
-									Some(c) => { c },
-									None => { return; },
-								};
+								client = connect_client(config.max_connection_retries)?;
 							},
 							_ => panic!("unexpected IO error in main loop: {}", e),
 						}
@@ -79,13 +98,18 @@ fn main() {
 	}
 }
 
-fn notification_loop(client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, previous_notification_id: &mut Option<u32>, music_directory: &Option<PathBuf>) -> mpd::error::Result<()> {
+fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, previous_notification_id: &mut Option<u32>, music_directory: &Option<PathBuf>) -> mpd::error::Result<()> {
 	client.wait(&[mpd::idle::Subsystem::Player])?;
 
 	let mut notification = notify_rust::Notification::new();
+
 	notification
-		.timeout(2500)
 		.hint(notify_rust::Hint::Category("MPD".into()));
+	
+	if let Some(t) = config.notification_timeout {
+		notification
+			.timeout(std::time::Duration::from_millis(t.into()));
+	}
 
 	let status = client.status()?;
 	
@@ -185,26 +209,30 @@ fn show_notification(notification: &mut notify_rust::Notification, previous_noti
 	}
 }
 
-fn connect_client() -> Option<mpd::Client> {
+fn connect_client(max_tries: u32) -> mpd::error::Result<mpd::Client> {
 	/* Get MPD host from environment */
 	let host = std::env::var("MPD_HOST").unwrap_or("127.0.0.1".into());
 	let port = std::env::var("MPD_PORT").unwrap_or("6600".into());
 	let address = host + ":" + &port;
 
-	const MAX_TRIES: u8 = 5;
 	let mut tries = 0;
 	loop {
-		match mpd::Client::connect(&address) {
-			Ok(c) => {
+		let res = mpd::Client::connect(&address);
+		match &res {
+			Ok(_) => {
 				eprintln!("Successfully connected client on {}", address);
-				break Some(c)
+				break res
 			},
 			Err(e) => {
-				eprintln!("Failed to connect client on {} due to error {}, try ({}/{}) retrying in 5 seconds...", address, e, tries + 1, MAX_TRIES);
-				tries += 1;
-				if tries == MAX_TRIES {
-					eprintln!("Failed to connect client after {} retries", tries);
-					break None;
+				if max_tries == 0 {
+					eprintln!("Failed to connect client on {} due to error {}, try ({}) retrying in 5 seconds...", address, e, tries + 1);
+				} else {
+					eprintln!("Failed to connect client on {} due to error {}, try ({}/{}) retrying in 5 seconds...", address, e, tries + 1, max_tries);
+					tries += 1;
+					if tries == max_tries {
+						eprintln!("Failed to connect client after {} retries", tries);
+						break res;
+					}
 				}
 				std::thread::sleep(std::time::Duration::from_secs(5));
 				continue;
