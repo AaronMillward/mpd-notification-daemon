@@ -25,6 +25,5 @@ You will likely run into problems running any uncommon MPD setups such as a remo
 ## TODO
 ### General
 - Native MPD `albumart` method
-- Connect/disconnect notification
 ### Customization
 - Enable/Disable icons

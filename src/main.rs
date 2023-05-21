@@ -86,7 +86,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 							/* These are the only errors I've observed coming from killing the MPD server. */
 							std::io::ErrorKind::BrokenPipe |
 							std::io::ErrorKind::ConnectionReset => {
+								show_notification(
+									notify_rust::Notification::new()
+										.hint(notify_rust::Hint::Category("MPD".into()))
+										.summary("MPD Disconnected")
+										.icon("network-wired-disconnected"),
+								&mut previous_notification_id);
+
 								client = connect_client(config.max_connection_retries)?;
+								
+								show_notification(
+									notify_rust::Notification::new()
+										.hint(notify_rust::Hint::Category("MPD".into()))
+										.summary("MPD Reconnected")
+										.icon("network-wired"),
+								&mut previous_notification_id);
 							},
 							_ => panic!("unexpected IO error in main loop: {}", e),
 						}
