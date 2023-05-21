@@ -26,6 +26,7 @@ struct Config {
 	notification_timeout: Option<u32>,
 	/// Max connection retries, 0 for unlimited.
 	max_connection_retries: u32,
+	format: String,
 }
 
 impl Default for Config {
@@ -34,7 +35,8 @@ impl Default for Config {
 			use_cover_art_hack: true,
 			music_directory: None,
 			notification_timeout: None,
-			max_connection_retries: 5
+			max_connection_retries: 5,
+			format: "%Artist - %Title".into(),
 		}
 	}
 }
@@ -146,7 +148,7 @@ fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id
 	
 				*previous_song_id = current_song_id;
 			}
-			fill_notification_with_song_info(&client.currentsong()?.expect("should have a song when player is playing."), &mut notification, music_directory);
+			fill_notification_with_song_info(config, &client.currentsong()?.expect("should have a song when player is playing."), &mut notification, music_directory);
 		},
 		mpd::State::Pause => return Ok(()),
 	}
@@ -155,10 +157,7 @@ fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id
 	Ok(())
 }
 
-fn fill_notification_with_song_info(song: &mpd::Song, notification: &mut notify_rust::Notification, music_directory: &Option<PathBuf>) {
-	let album_artist = song.tags.iter().find(|s| s.0 == "AlbumArtist").map(|(_,v)| v);
-	let artist = song.tags.iter().find(|s| s.0 == "Artist").map(|(_,v)| v);
-	
+fn fill_notification_with_song_info(config: &Config, song: &mpd::Song, notification: &mut notify_rust::Notification, music_directory: &Option<PathBuf>) {
 	if let Some(dir) = music_directory {
 		/* Check if the album art is alongside the song file. 
 		if not check one directory up in case the file is nested in for example a "CD1" directory */
@@ -170,24 +169,34 @@ fn fill_notification_with_song_info(song: &mpd::Song, notification: &mut notify_
 			notification.icon = song_path.to_string_lossy().to_string();
 		}
 	}
-
-	let display_artist = match (artist, album_artist) {
-		(None, None) => "<UNKNOWN ARTIST>",
-		(None, Some(s)) => s,
-		(Some(s), None) => s,
-		(Some(s1), Some(s2)) => {
-			if s2 == "Various Artists" {
-				s1
-			} else {
-				s2
-			}
-		},
+	
+	let artist = {
+		let album_artist = song.tags.iter().find(|s| s.0 == "AlbumArtist").map(|(_,v)| v);
+		let artist = song.tags.iter().find(|s| s.0 == "Artist").map(|(_,v)| v);
+		
+		match (artist, album_artist) {
+			(None, None) => "<UNKNOWN ARTIST>",
+			(None, Some(s)) => s,
+			(Some(s), None) => s,
+			(Some(s1), Some(s2)) => {
+				if s2 == "Various Artists" {
+					s1
+				} else {
+					s2
+				}
+			},
+		}
 	};
 
-	let title = song.title.clone().unwrap_or("<UNKNOWN TITLE>".into());
-
 	notification
-		.body(format!("{} - {}", display_artist, &title).as_str());
+		.body({
+			&config.format
+				.replace(r"\n", "\n")
+				.replace("%Artist", artist)
+				.replace("%Album", song.tags.get("Album").map(String::as_str).unwrap_or("<UNKNOWN ALBUM>"))
+				.replace("%Title", song.title.as_deref().unwrap_or("<UNKNOWN TITLE>"))
+				.replace("%Date", song.tags.get("Date").map(String::as_str).unwrap_or("<UNKNOWN DATE>"))
+		});
 }
 
 fn show_notification(notification: &mut notify_rust::Notification, previous_notification_id: &mut Option<u32>) {
