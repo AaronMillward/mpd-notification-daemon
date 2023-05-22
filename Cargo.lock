@@ -597,12 +597,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpd"
+version = "0.1.0"
+source = "git+https://github.com/kstep/rust-mpd.git#70757c31a2637baa6fed21e4cd20ac6ce1e6114b"
+dependencies = [
+ "bufstream",
+]
+
+[[package]]
 name = "mpd-notification-daemon"
 version = "0.1.0"
 dependencies = [
  "confy",
  "dirs",
- "mpd",
+ "mpd 0.0.12",
+ "mpd 0.1.0",
  "notify-rust",
  "serde",
  "time 0.3.21",

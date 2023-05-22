@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+#[cfg(not(feature = "use-mpd-git"))]
+use mpd_stable as mpd;
+
+#[cfg(feature = "use-mpd-git")]
+use mpd_git as mpd;
+
 use mpd::Idle;
 
 /* TODO: The MPD crate doesn't have support for the "albumart" command and the `Proto` module isn't public to manually use it. 
@@ -114,7 +120,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	}
 }
 
-fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id: &mut Option<mpd::Id>, previous_notification_id: &mut Option<u32>, music_directory: &Option<PathBuf>) -> mpd::error::Result<()> {
+fn notification_loop(
+	config: &Config,
+	client: &mut mpd::Client,
+	previous_song_id: &mut Option<mpd::Id>,
+	previous_notification_id: &mut Option<u32>,
+	music_directory: &Option<PathBuf>
+) -> mpd::error::Result<()> {
 	client.wait(&[mpd::idle::Subsystem::Player])?;
 
 	let mut notification = notify_rust::Notification::new();
@@ -162,7 +174,7 @@ fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id
 	
 				*previous_song_id = current_song_id;
 			}
-			fill_notification_with_song_info(config, &client.currentsong()?.expect("should have a song when player is playing."), &mut notification, music_directory);
+			fill_notification_with_current_song_info(config, client, &mut notification, music_directory)?;
 		},
 		mpd::State::Pause => return Ok(()),
 	}
@@ -171,21 +183,60 @@ fn notification_loop(config: &Config, client: &mut mpd::Client, previous_song_id
 	Ok(())
 }
 
-fn fill_notification_with_song_info(config: &Config, song: &mpd::Song, notification: &mut notify_rust::Notification, music_directory: &Option<PathBuf>) {
-	if let Some(dir) = music_directory {
-		/* Check if the album art is alongside the song file. 
-		if not check one directory up in case the file is nested in for example a "CD1" directory */
-		let mut song_path = dir.join(&song.file).with_file_name("cover.jpg");
-		if !song_path.exists() {
-			song_path = song_path.parent().expect("file should be in a directory.").parent().expect("file shouldn't be directly under root.").join("cover.jpg");
+fn fill_notification_with_current_song_info(
+	config: &Config,
+	client: &mut mpd::Client,
+	notification: &mut notify_rust::Notification,
+	music_directory: &Option<PathBuf>
+) -> mpd::error::Result<()> {
+	let song = &client.currentsong()?.expect("should have a song when player is playing.");
+	
+	if config.use_cover_art_hack {
+		if let Some(dir) = music_directory {
+			/* Check if the album art is alongside the song file. 
+			if not check one directory up in case the file is nested in for example a "CD1" directory */
+			let mut song_path = dir.join(&song.file).with_file_name("cover.jpg");
+			if !song_path.exists() {
+				song_path = song_path.parent().expect("file should be in a directory.").parent().expect("file shouldn't be directly under root.").join("cover.jpg");
+			}
+			if song_path.exists() {
+				notification.icon = song_path.to_string_lossy().to_string();
+			}
 		}
-		if song_path.exists() {
-			notification.icon = song_path.to_string_lossy().to_string();
+	} 
+	#[cfg(feature = "albumart")]
+	if !config.use_cover_art_hack {
+		/* The icon isn't essential to the notification so we can continue without it if there are errors. */
+		/* We already have all the info we need to make the notif at this point in
+		the function so a connection error doesn't even need to be returned here. */
+		match client.albumart(song) {
+			Ok(data) => {
+				let path = std::env::temp_dir().join("mpdnd-cover");
+				match std::fs::File::create(&path) {
+					Ok(mut f) => {
+						use std::io::Write;
+						f.write_all(&data).unwrap();
+						notification.icon(&path.to_string_lossy());
+					},
+					Err(e) => eprintln!("failed to open album art temp file due to IO error: {}", e),
+				}
+			},
+			Err(e) => {
+				/* XXX: I haven't dug deep into this but it seems like `BadPair` here just means "Couldn't find album art"
+				bv=ut we still want to report other errors. */
+				if !matches!(e, mpd::error::Error::Parse(mpd::error::ParseError::BadPair)) {
+					eprintln!("failed to retrieve album art due to mpd error: {}", e);
+				}
+			}
+			
 		}
 	}
 	
 	let artist = {
 		let album_artist = song.tags.iter().find(|s| s.0 == "AlbumArtist").map(|(_,v)| v);
+		#[cfg(feature = "use-mpd-git")]
+		let artist = song.artist.as_ref();
+		#[cfg(not(feature = "use-mpd-git"))]
 		let artist = song.tags.iter().find(|s| s.0 == "Artist").map(|(_,v)| v);
 		
 		match (artist, album_artist) {
@@ -207,10 +258,14 @@ fn fill_notification_with_song_info(config: &Config, song: &mpd::Song, notificat
 			&config.format
 				.replace(r"\n", "\n")
 				.replace("%Artist", artist)
-				.replace("%Album", song.tags.get("Album").map(String::as_str).unwrap_or("<UNKNOWN ALBUM>"))
+				/* This awful line works on both versions of the mpd crate where
+				in stable `tags` is a BTree<String, String> and in git is a Vec<String, String> */
+				.replace("%Album", song.tags.iter().find(|s| s.0 == "Album").map(|(_,v)| v).map(String::as_str).unwrap_or("<UNKNOWN ALBUM>"))
 				.replace("%Title", song.title.as_deref().unwrap_or("<UNKNOWN TITLE>"))
-				.replace("%Date", song.tags.get("Date").map(String::as_str).unwrap_or("<UNKNOWN DATE>"))
+				.replace("%Date", song.tags.iter().find(|s| s.0 == "Date").map(|(_,v)| v).map(String::as_str).unwrap_or("<UNKNOWN DATE>"))
 		});
+	
+	Ok(())
 }
 
 fn show_notification(notification: &mut notify_rust::Notification, previous_notification_id: &mut Option<u32>) {

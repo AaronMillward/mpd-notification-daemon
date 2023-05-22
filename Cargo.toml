@@ -3,11 +3,14 @@ name = "mpd-notification-daemon"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+albumart = ["use-mpd-git"]
+use-mpd-git = ["mpd-git"]
 
 [dependencies]
 notify-rust = "4.8.0"
-mpd = "0.0.12" #{ git = "https://github.com/kstep/rust-mpd.git" }
+mpd-stable = { package = "mpd", version = "0.0.12"}
+mpd-git = { package = "mpd", git = "https://github.com/kstep/rust-mpd.git", optional = true }
 dirs = "5.0.1"
 time = "*"
 confy = "0.5.1"
