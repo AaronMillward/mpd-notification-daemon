@@ -8,27 +8,27 @@ use mpd_git as mpd;
 
 use mpd::Idle;
 
-/* TODO: The MPD crate doesn't have support for the "albumart" command and the `Proto` module isn't public to manually use it. 
-Update: The git version of the crate does support albumart, to use it we would need to call it, save the result to a temp file, then pass that path to the notif.
-but should we use the potentially unstable git version to do this? maybe make it a feature flag?
-*/
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum CoverArtMethod {
+	/// Don't display any cover art
+	None,
+	/// Displays cover art without needing the `albumart` mpd function.
+	/* The album art hack lets us display the album art without using the "albumart" command.
+	but is limited in that it doesn't support anything but a local basic mpd configuration,
+	it doesn't respect mounts and the client must be on the same filesystem as the host. */
+	LocalHack,
+	/// Displays cover art using mpd's `albumart` function. (Requires the `albumart` feature flag.)
+	Native,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Config {
-	/// The album art hack lets us display the album art without using the "albumart" command. 
-	///
-	/// But is limited in that it doesn't support anything but a local basic mpd configuration,
-	/// it doesn't respect mounts and the client must be on the same filesystem as the host.
-	/// 
-	/// To use this hack this variable should be true, you can then either...
-	/// 1. Set `music_directory` as None to try to automatically read from `~/.config/mpd/mpd.conf`
-	/// 1. Set `music_directory` with an explicit value.
-	use_cover_art_hack: bool,
-	/// Only applies when `use_cover_art_hack` is enabled.
-	/// Should match the music directory in `~/.config/mpd/mpd.conf` or leave blank to automatically
+	cover_art_method: CoverArtMethod,
+	/// Only applies when `cover_art_method` is `LocalHack`.
+	/// Should match the music directory in `~/.config/mpd/mpd.conf` or `None` to automatically
 	/// detect from `~/.config/mpd/mpd.conf`
 	music_directory: Option<String>,
-	/// Timout in milliseconds, leave empty for system default.
+	/// Timeout in milliseconds, leave empty for system default.
 	notification_timeout: Option<u32>,
 	/// Max connection retries, 0 for unlimited.
 	max_connection_retries: u32,
@@ -38,7 +38,7 @@ struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			use_cover_art_hack: true,
+			cover_art_method: CoverArtMethod::LocalHack,
 			music_directory: None,
 			notification_timeout: None,
 			max_connection_retries: 5,
@@ -48,14 +48,19 @@ impl Default for Config {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let config: Config = confy::load("mpdnd", None)?;
+	let mut config: Config = confy::load("mpdnd", None)?;
+
+	if !cfg!(feature = "albumart") && matches!(config.cover_art_method, CoverArtMethod::Native) {
+		eprintln!("trying to use native album art method without albumart feature! falling back to hack.");
+		config.cover_art_method = CoverArtMethod::LocalHack
+	}
 
 	let mut client = connect_client(config.max_connection_retries)?;
 
 	/* TODO: You can get the music_directory from the client if it is connected by local socket 
 	Although I'm unsure if we should be using listmounts but it just seems to error when used here.
 	*/
-	let music_directory = if config.use_cover_art_hack {
+	let music_directory = if matches!(config.cover_art_method, CoverArtMethod::LocalHack) {
 		config.music_directory.clone().map(PathBuf::from)
 			.or_else(|| {
 				/* Auto read the mpd config for the music directory. */
@@ -190,45 +195,48 @@ fn fill_notification_with_current_song_info(
 	music_directory: &Option<PathBuf>
 ) -> mpd::error::Result<()> {
 	let song = &client.currentsong()?.expect("should have a song when player is playing.");
-	
-	if config.use_cover_art_hack {
-		if let Some(dir) = music_directory {
-			/* Check if the album art is alongside the song file. 
-			if not check one directory up in case the file is nested in for example a "CD1" directory */
-			let mut song_path = dir.join(&song.file).with_file_name("cover.jpg");
-			if !song_path.exists() {
-				song_path = song_path.parent().expect("file should be in a directory.").parent().expect("file shouldn't be directly under root.").join("cover.jpg");
-			}
-			if song_path.exists() {
-				notification.icon = song_path.to_string_lossy().to_string();
-			}
-		}
-	} 
-	#[cfg(feature = "albumart")]
-	if !config.use_cover_art_hack {
-		/* The icon isn't essential to the notification so we can continue without it if there are errors. */
-		/* We already have all the info we need to make the notif at this point in
-		the function so a connection error doesn't even need to be returned here. */
-		match client.albumart(song) {
-			Ok(data) => {
-				let path = std::env::temp_dir().join("mpdnd-cover");
-				match std::fs::File::create(&path) {
-					Ok(mut f) => {
-						use std::io::Write;
-						f.write_all(&data).unwrap();
-						notification.icon(&path.to_string_lossy());
-					},
-					Err(e) => eprintln!("failed to open album art temp file due to IO error: {}", e),
+
+	match config.cover_art_method {
+		CoverArtMethod::None => {},
+		CoverArtMethod::LocalHack => {
+			if let Some(dir) = music_directory {
+				/* Check if the album art is alongside the song file. 
+				if not check one directory up in case the file is nested in for example a "CD1" directory */
+				let mut song_path = dir.join(&song.file).with_file_name("cover.jpg");
+				if !song_path.exists() {
+					song_path = song_path.parent().expect("file should be in a directory.").parent().expect("file shouldn't be directly under root.").join("cover.jpg");
 				}
-			},
-			Err(e) => {
-				/* XXX: I haven't dug deep into this but it seems like `BadPair` here just means "Couldn't find album art"
-				bv=ut we still want to report other errors. */
-				if !matches!(e, mpd::error::Error::Parse(mpd::error::ParseError::BadPair)) {
-					eprintln!("failed to retrieve album art due to mpd error: {}", e);
+				if song_path.exists() {
+					notification.icon = song_path.to_string_lossy().to_string();
 				}
 			}
-			
+		},
+		CoverArtMethod::Native => {
+			#[cfg(feature = "albumart")]
+			/* The icon isn't essential to the notification so we can continue without it if there are errors. */
+			/* We already have all the info we need to make the notif at this point in
+			the function so a connection error doesn't even need to be returned here. */
+			match client.albumart(song) {
+				Ok(data) => {
+					let path = std::env::temp_dir().join("mpdnd-cover");
+					match std::fs::File::create(&path) {
+						Ok(mut f) => {
+							use std::io::Write;
+							f.write_all(&data).unwrap();
+							notification.icon(&path.to_string_lossy());
+						},
+						Err(e) => eprintln!("failed to open album art temp file due to IO error: {}", e),
+					}
+				},
+				Err(e) => {
+					/* XXX: I haven't dug deep into this but it seems like `BadPair` here just means "Couldn't find album art"
+					bv=ut we still want to report other errors. */
+					if !matches!(e, mpd::error::Error::Parse(mpd::error::ParseError::BadPair)) {
+						eprintln!("failed to retrieve album art due to mpd error: {}", e);
+					}
+				}
+				
+			}
 		}
 	}
 	
